@@ -1,3 +1,4 @@
+
 package com.queueforge;
 
 import java.util.concurrent.*;
@@ -6,17 +7,21 @@ import java.util.concurrent.atomic.AtomicLong;
 public class QueueForge implements AutoCloseable {
 
     private static final AtomicLong SEQUENCE = new AtomicLong();
-    private static final String STOP = "__STOP__";
+    private static final String STOP = "__QUEUEFORGE_STOP__";
 
-    public record Job(String name, int priority, Runnable task, long sequence)
-        implements Comparable<Job> {
+    public record Job(
+            String name,
+            int priority,
+            Runnable task,
+            long sequence
+    ) implements Comparable<Job> {
 
         @Override
         public int compareTo(Job other) {
-            int result = Integer.compare(other.priority, priority);
+            int result = Integer.compare(other.priority(), priority());
             return result != 0
                     ? result
-                    : Long.compare(sequence, other.sequence);
+                    : Long.compare(sequence, other.sequence());
         }
     }
 
@@ -25,6 +30,9 @@ public class QueueForge implements AutoCloseable {
 
     private final ExecutorService workers;
     private final int workerCount;
+
+    // Guards submission against shutdown.
+    private boolean accepting = true;
 
     public QueueForge(int workerCount) {
         if (workerCount < 1) {
@@ -40,9 +48,22 @@ public class QueueForge implements AutoCloseable {
         }
     }
 
-    public void submit(String name, int priority, Runnable task) {
-        if (workers.isShutdown()) {
-            throw new IllegalStateException("Scheduler is shutting down");
+    public synchronized void submit(
+            String name, int priority, Runnable task) {
+
+        if (!accepting) {
+            throw new IllegalStateException(
+                    "QueueForge is shutting down");
+        }
+
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Job name must not be blank");
+        }
+
+        if (task == null) {
+            throw new IllegalArgumentException(
+                    "Job task must not be null");
         }
 
         queue.add(new Job(
@@ -68,7 +89,7 @@ public class QueueForge implements AutoCloseable {
                     job.task().run();
 
                     System.out.println("Completed: " + job.name());
-                } catch (Exception e) {
+                } catch (RuntimeException e) {
                     System.err.printf(
                             "Job failed: %s — %s%n",
                             job.name(), e.getMessage());
@@ -80,10 +101,21 @@ public class QueueForge implements AutoCloseable {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
+        if (!accepting) {
+            return;
+        }
+
+        // No new job can be accepted after this point.
+        accepting = false;
+
+        // Stop jobs have the lowest priority. Their later sequence
+        // ensures existing jobs with equal priority run first.
         for (int i = 0; i < workerCount; i++) {
             queue.add(new Job(
-                    STOP, Integer.MIN_VALUE, () -> {},
+                    STOP,
+                    Integer.MIN_VALUE,
+                    () -> {},
                     SEQUENCE.getAndIncrement()));
         }
 
@@ -92,6 +124,7 @@ public class QueueForge implements AutoCloseable {
         try {
             if (!workers.awaitTermination(30, TimeUnit.SECONDS)) {
                 workers.shutdownNow();
+                workers.awaitTermination(5, TimeUnit.SECONDS);
             }
         } catch (InterruptedException e) {
             workers.shutdownNow();

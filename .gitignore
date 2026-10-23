@@ -11,3 +11,10 @@ target/
 # Operating system files
 .DS_Store
 Thumbs.db
+# Runtime database files
+*.db
+*.db-shm
+*.db-wal
+
+# Local backup files
+*.bak

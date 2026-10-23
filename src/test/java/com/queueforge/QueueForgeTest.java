@@ -1,4 +1,5 @@
 
+
 package com.queueforge;
 
 import org.junit.jupiter.api.Test;
@@ -13,10 +14,10 @@ class QueueForgeTest {
     @Test
     void higherPriorityJobComesFirst() {
         QueueForge.Job low =
-                new QueueForge.Job("Low", 1, () -> {}, 0);
+                new QueueForge.Job(1, "Low", 1, () -> {}, 0);
 
         QueueForge.Job high =
-                new QueueForge.Job("High", 10, () -> {}, 1);
+                new QueueForge.Job(2, "High", 10, () -> {}, 1);
 
         assertTrue(high.compareTo(low) < 0);
     }
@@ -24,10 +25,10 @@ class QueueForgeTest {
     @Test
     void equalPriorityJobsPreserveSequenceOrder() {
         QueueForge.Job earlier =
-                new QueueForge.Job("Earlier", 5, () -> {}, 1);
+                new QueueForge.Job(1, "Earlier", 5, () -> {}, 1);
 
         QueueForge.Job later =
-                new QueueForge.Job("Later", 5, () -> {}, 2);
+                new QueueForge.Job(2, "Later", 5, () -> {}, 2);
 
         assertTrue(earlier.compareTo(later) < 0);
     }

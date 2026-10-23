@@ -1,6 +1,8 @@
 
+
 package com.queueforge;
 
+import java.sql.SQLException;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -10,6 +12,7 @@ public class QueueForge implements AutoCloseable {
     private static final String STOP = "__QUEUEFORGE_STOP__";
 
     public record Job(
+            long id,
             String name,
             int priority,
             Runnable task,
@@ -30,17 +33,29 @@ public class QueueForge implements AutoCloseable {
 
     private final ExecutorService workers;
     private final int workerCount;
+    private final JobStore store;
 
-    // Guards submission against shutdown.
     private boolean accepting = true;
 
     public QueueForge(int workerCount) {
+        this(workerCount, "queueforge.db");
+    }
+
+    public QueueForge(int workerCount, String databasePath) {
         if (workerCount < 1) {
             throw new IllegalArgumentException(
                     "workerCount must be at least 1");
         }
 
         this.workerCount = workerCount;
+
+        try {
+            this.store = new JobStore(databasePath);
+        } catch (SQLException e) {
+            throw new IllegalStateException(
+                    "Could not initialize job database", e);
+        }
+
         this.workers = Executors.newFixedThreadPool(workerCount);
 
         for (int i = 0; i < workerCount; i++) {
@@ -48,7 +63,7 @@ public class QueueForge implements AutoCloseable {
         }
     }
 
-    public synchronized void submit(
+    public synchronized long submit(
             String name, int priority, Runnable task) {
 
         if (!accepting) {
@@ -66,8 +81,19 @@ public class QueueForge implements AutoCloseable {
                     "Job task must not be null");
         }
 
+        final long id;
+
+        try {
+            id = store.createJob(name, priority);
+        } catch (SQLException e) {
+            throw new IllegalStateException(
+                    "Could not persist submitted job", e);
+        }
+
         queue.add(new Job(
-                name, priority, task, SEQUENCE.getAndIncrement()));
+                id, name, priority, task, SEQUENCE.getAndIncrement()));
+
+        return id;
     }
 
     private void workerLoop() {
@@ -80,23 +106,52 @@ public class QueueForge implements AutoCloseable {
                 }
 
                 try {
+                    updateStatus(job.id(), "RUNNING", null);
+
                     System.out.printf(
-                            "[%s] Started: %s (priority=%d)%n",
+                            "[%s] Started: %s (priority=%d, id=%d)%n",
                             Thread.currentThread().getName(),
                             job.name(),
-                            job.priority());
+                            job.priority(),
+                            job.id());
 
                     job.task().run();
 
+                    updateStatus(job.id(), "COMPLETED", null);
                     System.out.println("Completed: " + job.name());
+
                 } catch (RuntimeException e) {
+                    markFailed(job.id(), e.getMessage());
+
                     System.err.printf(
                             "Job failed: %s — %s%n",
                             job.name(), e.getMessage());
-                }
+
+                              }
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private void updateStatus(
+            long id, String status, String errorMessage) {
+        try {
+            store.updateStatus(id, status, errorMessage);
+        } catch (SQLException e) {
+            throw new IllegalStateException(
+                    "Could not update job " + id
+                            + " to " + status, e);
+        }
+    }
+
+    private void markFailed(long id, String message) {
+        try {
+            store.updateStatus(id, "FAILED", message);
+        } catch (SQLException e) {
+            System.err.println(
+                    "Could not persist failure for job "
+                            + id + ": " + e.getMessage());
         }
     }
 
@@ -106,13 +161,11 @@ public class QueueForge implements AutoCloseable {
             return;
         }
 
-        // No new job can be accepted after this point.
         accepting = false;
 
-        // Stop jobs have the lowest priority. Their later sequence
-        // ensures existing jobs with equal priority run first.
         for (int i = 0; i < workerCount; i++) {
             queue.add(new Job(
+                    -1,
                     STOP,
                     Integer.MIN_VALUE,
                     () -> {},
@@ -129,6 +182,14 @@ public class QueueForge implements AutoCloseable {
         } catch (InterruptedException e) {
             workers.shutdownNow();
             Thread.currentThread().interrupt();
+        } finally {
+            try {
+                store.close();
+            } catch (SQLException e) {
+                System.err.println(
+                        "Could not close job database: "
+                                + e.getMessage());
+            }
         }
     }
 
@@ -159,3 +220,4 @@ public class QueueForge implements AutoCloseable {
         }
     }
 }
+

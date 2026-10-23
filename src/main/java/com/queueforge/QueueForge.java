@@ -8,8 +8,8 @@ public class QueueForge implements AutoCloseable {
     private static final AtomicLong SEQUENCE = new AtomicLong();
     private static final String STOP = "__STOP__";
 
-    record Job(String name, int priority, Runnable task, long sequence)
-            implements Comparable<Job> {
+    public record Job(String name, int priority, Runnable task, long sequence)
+        implements Comparable<Job> {
 
         @Override
         public int compareTo(Job other) {

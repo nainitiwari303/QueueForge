@@ -3,82 +3,126 @@ package com.queueforge;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class QueueForge {
+public class QueueForge implements AutoCloseable {
 
     private static final AtomicLong SEQUENCE = new AtomicLong();
+    private static final String STOP = "__STOP__";
 
     record Job(String name, int priority, Runnable task, long sequence)
             implements Comparable<Job> {
 
         @Override
         public int compareTo(Job other) {
-            int priorityOrder =
-                    Integer.compare(other.priority(), this.priority());
-
-            if (priorityOrder != 0) {
-                return priorityOrder;
-            }
-
-            return Long.compare(this.sequence(), other.sequence());
+            int result = Integer.compare(other.priority, priority);
+            return result != 0
+                    ? result
+                    : Long.compare(sequence, other.sequence);
         }
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        int workerCount = 2;
+    private final PriorityBlockingQueue<Job> queue =
+            new PriorityBlockingQueue<>();
 
-        PriorityBlockingQueue<Job> queue = new PriorityBlockingQueue<>();
+    private final ExecutorService workers;
+    private final int workerCount;
 
-        queue.add(new Job("Generate report", 1,
-                () -> process("Generate report"), SEQUENCE.getAndIncrement()));
+    public QueueForge(int workerCount) {
+        if (workerCount < 1) {
+            throw new IllegalArgumentException(
+                    "workerCount must be at least 1");
+        }
 
-        queue.add(new Job("Process payment", 10,
-                () -> process("Process payment"), SEQUENCE.getAndIncrement()));
+        this.workerCount = workerCount;
+        this.workers = Executors.newFixedThreadPool(workerCount);
 
-        queue.add(new Job("Send notification", 3,
-                () -> process("Send notification"), SEQUENCE.getAndIncrement()));
+        for (int i = 0; i < workerCount; i++) {
+            workers.submit(this::workerLoop);
+        }
+    }
 
-        queue.add(new Job("Validate transaction", 8,
-                () -> process("Validate transaction"), SEQUENCE.getAndIncrement()));
+    public void submit(String name, int priority, Runnable task) {
+        if (workers.isShutdown()) {
+            throw new IllegalStateException("Scheduler is shutting down");
+        }
 
-        ExecutorService workers = Executors.newFixedThreadPool(workerCount);
+        queue.add(new Job(
+                name, priority, task, SEQUENCE.getAndIncrement()));
+    }
 
-        System.out.println("QueueForge started with " + workerCount + " workers.");
-
+    private void workerLoop() {
         try {
-            while (!queue.isEmpty()) {
-                Job job = queue.poll();
+            while (true) {
+                Job job = queue.take();
 
-                if (job != null) {
-                    workers.submit(() -> {
-                        System.out.printf(
-                                "[%s] Executing: %s (priority=%d)%n",
-                                Thread.currentThread().getName(),
-                                job.name(),
-                                job.priority()
-                        );
+                if (STOP.equals(job.name())) {
+                    return;
+                }
 
-                        job.task().run();
-                    });
+                try {
+                    System.out.printf(
+                            "[%s] Started: %s (priority=%d)%n",
+                            Thread.currentThread().getName(),
+                            job.name(),
+                            job.priority());
+
+                    job.task().run();
+
+                    System.out.println("Completed: " + job.name());
+                } catch (Exception e) {
+                    System.err.printf(
+                            "Job failed: %s — %s%n",
+                            job.name(), e.getMessage());
                 }
             }
-        } finally {
-            workers.shutdown();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
 
+    @Override
+    public void close() {
+        for (int i = 0; i < workerCount; i++) {
+            queue.add(new Job(
+                    STOP, Integer.MIN_VALUE, () -> {},
+                    SEQUENCE.getAndIncrement()));
+        }
+
+        workers.shutdown();
+
+        try {
             if (!workers.awaitTermination(30, TimeUnit.SECONDS)) {
                 workers.shutdownNow();
             }
+        } catch (InterruptedException e) {
+            workers.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    public static void main(String[] args) {
+        try (QueueForge scheduler = new QueueForge(2)) {
+            scheduler.submit("Generate report", 1,
+                    () -> process("Generate report"));
+
+            scheduler.submit("Process payment", 10,
+                    () -> process("Process payment"));
+
+            scheduler.submit("Send notification", 3,
+                    () -> process("Send notification"));
+
+            scheduler.submit("Validate transaction", 8,
+                    () -> process("Validate transaction"));
         }
 
-        System.out.println("QueueForge finished processing all submitted jobs.");
+        System.out.println("QueueForge shut down cleanly.");
     }
 
     private static void process(String name) {
         try {
             Thread.sleep(800);
-            System.out.println("Completed: " + name);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            System.err.println("Interrupted: " + name);
+            throw new RuntimeException("Interrupted", e);
         }
     }
 }

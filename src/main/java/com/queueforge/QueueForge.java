@@ -1,4 +1,4 @@
-﻿package com.queueforge;
+package com.queueforge;
 
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
